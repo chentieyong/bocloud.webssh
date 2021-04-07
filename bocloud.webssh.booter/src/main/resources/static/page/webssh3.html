@@ -1,0 +1,348 @@
+<!doctype html>
+<html>
+<head>
+    <title>WebSSH</title>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="../css/xterm.css"/>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+        }
+
+        #tab li {
+            float: left;
+            list-style: none;
+            width: 80px;
+            height: 40px;
+            line-height: 40px;
+            cursor: pointer;
+            text-align: center;
+        }
+
+        #container {
+            position: relative;
+        }
+
+        .contentContainer {
+            height: 100%;
+            width: 100%;
+            position: absolute;
+            left: 0;
+        }
+
+        .clearBox {
+            clear: both;
+        }
+
+        .commandContainer {
+
+        }
+    </style>
+</head>
+<body>
+<div id="root">
+    Tab个数: <input type="number" v-model="numSize"/>
+    <button @click="sure()">批量建立连接</button>
+    命令: <input ref="commandInput" type="text" v-model="commandStr" class="commandContainer"/>
+    <ul id="tab" v-html="result"></ul>
+    <div class="clearBox"></div>
+    <div id="container" v-html="cmdResult"></div>
+</div>
+<script src="../js/vue.js"></script>
+<script src="../js/jquery-3.4.1.min.js"></script>
+<script src="../js/xterm.js" charset="utf-8"></script>
+<script src="../js/webssh.js" charset="utf-8"></script>
+<script>
+    var TerminalContainer = {
+        data() {
+            return {
+                numSize: 0, // 终端数量
+                commandStr: '', // 输入命令
+                result: '', // ui/li innerHtml
+                cmdResult: '', // command innerHtml
+                termList: [],
+                clientList: [],
+                urlParam: {
+                    fullTag: "",
+                    namespace: "",
+                    podName: ""
+                },
+
+                order: "",
+                shellWs: "",
+                inputValue: "",
+                term: "", // 保存terminal实例
+                showOrder: "", // 保存服务端返回的命令
+                inputList: [], // 保存用户输入的命令，用以上下健切换
+                beforeUnload_time: "",
+                rows: 40,
+                cols: 100,
+                command: ''
+            }
+        },
+        created() {
+
+        },
+        mounted() {
+
+        },
+        methods: {
+            sure() {
+                for (let i = 1; i <= this.numSize; i++) {
+                    this.result += `
+               <li id="tab${i}" onclick="show(${i})">第${i}页</li>
+            `
+                    if (i === 1) {
+                        this.cmdResult += `
+                            <div class="contentContainer" id="content${i}" style="display: block">
+                                <div id="terminal${i}" style="width: 100%;height: 100%"></div>
+                            </div>
+                `
+                    } else {
+                        this.cmdResult += `
+                            <div class="contentContainer" id="content${i}">
+                                 <div id="terminal${i}" style="width: 100%;height: 100%"></div>
+                            </div>
+                `
+                    }
+                }
+
+                for (let i = 1; i <= this.numSize; i++) {
+                    this.openTerminal({
+                        host: "172.16.41.15",
+                        operate: "connect",
+                        password: "root",
+                        port: "22",
+                        username: "root"
+                    }, i);
+                }
+            },
+            openTerminal(options, index) {
+                let client = new WSSHClient();
+                let term = new Terminal({
+                    cols: 97,
+                    rows: 30,
+                    cursorBlink: true, // 光标闪烁
+                    cursorStyle: "block", // 光标样式  null | 'block' | 'underline' | 'bar'
+                    scrollback: 10000, //回滚
+                    tabStopWidth: 8, //制表宽度
+                    screenKeys: true
+                });
+
+                term.on('data', function (data) {
+                    //键盘输入时的回调函数
+                    client.sendClientData(data);
+                });
+
+                function runFakeTerminal(_this) {
+                    if (term._initialized) {
+                        return;
+                    }
+
+                    term._initialized = true;
+
+                    term.prompt = () => {
+                        term.write("\r\n ");
+                    };
+
+                    term.writeln("Welcome to use Superman. ");
+                    term.writeln(
+                        `This is Web Terminal of pod\x1B[1;3;31m ${
+                            _this.urlParam.podName
+                        }\x1B[0m in namespace\x1B[1;3;31m ${_this.urlParam.namespace}\x1B[0m`
+                    );
+                    term.prompt();
+                    // 监控键盘输入事件
+                    // / **
+                    //     *添加事件监听器，用于按下键时的事件。事件值包含
+                    //     *将在data事件以及DOM事件中发送的字符串
+                    //     *触发了它。
+                    //     * @返回一个IDisposable停止监听。
+                    //  * /
+                    term.on("key", function (key, ev) {
+                        // 可打印状态，即不是alt键ctrl等功能健时
+                        const printable =
+                            !ev.altKey && !ev.altGraphKey && !ev.ctrlKey && !ev.metaKey;
+                        // 因服务端返回命令包含乱码，但使用write方法输出时并不显示，故将真实显示内容截取出来
+                        let index = _this.showOrder.indexOf("sh");
+                        let show = _this.showOrder.substr(index, _this.showOrder.length - 1);
+
+                        //  当输入回车时
+                        if (ev.keyCode === 13) {
+                            if (_this.order == "cls" || _this.order == "clear") {
+                                _this.order = "";
+                                return false;
+                            }
+                            //先将数据发送
+                            term.prompt();
+                            // 判断如果不是英文给出提醒
+                            let reg = /[a-zA-Z]/;
+                            let order = {
+                                Data: _this.order,
+                                Op: "stdin"
+                            };
+
+                            if (!reg.test(_this.order)) {
+                                term.writeln("请输入有效指令~");
+                            } else {
+                                // 发送数据
+                                _this.inputList.push(_this.order);
+                                let last = _this.inputList.length - 1;
+                                _this.onSend(order);
+                                // 清空输入内容变量
+                                _this.inputList.splice(0, last)
+                                _this.order = ''
+                            }
+                        } else if (ev.keyCode === 8) {
+                            // 当输入退
+                            // Do not delete the prompt
+                            // 当前行字符长度如果等于后端返回字符就不进行删除
+                            if (term._core.buffer.x > _this.showOrder.length) {
+                                term.write("\b \b"); // 输出退格
+                            }
+
+                            // 将输入内容变量删除
+                            if (_this.trim(_this.order) == _this.trim(_this.showOrder)) {
+                                return false;
+                            } else {
+                                _this.order = _this.order.substr(0, _this.order.length - 1);
+                            }
+                        } else if (ev.keyCode == 38 || ev.keyCode == 40) {
+                            let len = _this.inputList.length;
+                            let code = ev.keyCode;
+
+                            if (code === 38 && last <= len && last >= 0) {
+                                // 直接取出字符串数组最后一个元素
+                                let inputVal = _this.inputList[last];
+                                term.write(inputVal);
+                                if (last > 0) {
+                                    last--;
+                                }
+                            }
+                            if (code === 40 && last < len) {
+                                // last现在为当前元素
+                                if (last == len - 1) {
+                                    return;
+                                }
+                                if (last < len - 1) {
+                                    last++;
+                                }
+
+                                let inputVal = _this.inputList[last];
+                                term.write(inputVal);
+                            }
+                        } else if (ev.keyCode === 9) {
+                            // 如果按tab键前输入了之前后端返回字符串的第一个字符，就显示此命令
+                            if (_this.order !== "" && show.indexOf(_this.order) == 0) {
+                                term.write(_this.showOrder);
+                            }
+                        } else if (printable) {
+                            // 当为可打印内容时
+                            if (/[a-zA-Z]/.test(key)) {
+                                key = key.toLowerCase();
+                            }
+                            // 存入输入内容变量
+                            _this.order = _this.order + key;
+                            // 将变量写入终端内
+                            term.write(key);
+                        }
+                    })
+
+                    term.on("paste", function (data) {
+                        _this.order = data;
+                        term.write(data);
+                    });
+
+                    term.on("resize", size => {
+                        let order = {
+                            Rows: parseInt(size.rows),
+                            Cols: parseInt(size.cols),
+                            Op: "resize"
+                        };
+
+                        _this.onSend(order);
+                    });
+
+                    _this.term = term;
+                }
+
+                runFakeTerminal(this)
+                this.inputListener()
+                console.log(document.getElementById('terminal' + index))
+                term.open(document.getElementById('terminal' + index));
+                //在页面上显示连接中...
+                term.write('Connecting...\r\n');
+                //执行连接操作
+                client.connect({
+                    onError: function (error) {
+                        //连接失败回调
+                        term.write('Error: ' + error + '\r\n');
+                    },
+                    onConnect: function () {
+                        //连接成功回调
+                        client.sendInitData(options);
+                    },
+                    onClose: function () {
+                        //连接关闭回调
+                        term.write("\rconnection closed");
+                        window.location.href = "/login";
+                    },
+                    onData: function (data) {
+                        //收到数据时回调
+                        if (data.indexOf('\r\nlogout') > -1) {
+                            window.localStorage.clear();
+                            window.location.href = "/login";
+                        }
+                        term.write(data);
+                    }
+                });
+
+                this.termList.push(term)
+                this.clientList.push(client)
+            },
+            onSend(data) {
+                console.log(data)
+            },
+            //删除左右两端的空格
+            trim(str) {
+                return str.replace(/(^\s*)|(\s*$)/g, "");
+            },
+            //监听输入事件
+            inputListener() {
+                let _this = this
+                this.$refs['commandInput'].addEventListener("keyup", (event) => {
+                    // 可打印状态，即不是alt键ctrl等功能健时
+                    let key = event.target.value
+                    const printable =
+                        !event.altKey && !event.altGraphKey && !event.ctrlKey && !event.metaKey;
+                    if (event.keyCode === 8) {
+                        // 将输入内容变量删除
+                        if (_this.trim(_this.order) == _this.trim(_this.showOrder)) {
+                            return false;
+                        } else {
+                            _this.order = _this.order.substr(0, _this.order.length - 1);
+                        }
+                        console.log(this.order)
+                        _this.term.clear()
+                        _this.term.write(_this.order);
+                    } else if (printable) {
+                        // 当为可打印内容时
+                        if (/[a-zA-Z]/.test(key)) {
+                            key = key.toLowerCase();
+                        }
+                        // 存入输入内容变量
+                        _this.order = _this.order + key;
+                        // 将变量写入终端内
+                        _this.term.write(key);
+                    }
+
+                })
+            }
+        }
+    }
+    var TerminalWrapper = Vue.extend(TerminalContainer)
+    new TerminalWrapper().$mount('#root')
+</script>
+</body>
+</html>
